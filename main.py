@@ -3,18 +3,22 @@ from tkinter import ttk, messagebox, simpledialog
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import datetime as dt
 from typing import Dict, List, Callable
+import webbrowser
+import tempfile
+import os
 
 class StockTradingApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Stock Trading Signal Application")
+        self.root.title("Trading Signal Indicator")
         self.root.geometry("1200x800")
         
         # Data storage
+        self.watchlist_inner = ['AAPL','GOOGL','TSLA']
         self.watchlist = []  # List of tickers
         self.stock_data = {}  # Dictionary to store fetched data
         self.signal_algorithms = {
@@ -24,9 +28,12 @@ class StockTradingApp:
             "Bollinger Bands": self.compute_bollinger
         }
         self.current_algorithm = "Moving Average Crossover"
-        
-        # Create main layout
+        self.temp_html_file = None
         self.create_layout()
+        # Create main layout
+        for item in self.watchlist_inner:
+            self.add_ticker(item)
+
         
     def create_layout(self):
         # Create frames
@@ -57,7 +64,7 @@ class StockTradingApp:
         control_frame = ttk.Frame(left_frame)
         control_frame.pack(fill=tk.X, pady=10)
         
-        ttk.Button(control_frame, text="Add Stock/Fund", command=self.add_ticker).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Add Stock/Fund", command=self.add_ticker_btn).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Remove Selected", command=self.remove_ticker).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Refresh Data", command=self.refresh_data).pack(side=tk.LEFT, padx=5)
         
@@ -74,8 +81,17 @@ class StockTradingApp:
         algo_dropdown.bind("<<ComboboxSelected>>", self.change_algorithm)
         
         # Right frame components (charts and data)
-        self.chart_frame = ttk.Frame(right_frame)
+        self.chart_frame = ttk.LabelFrame(right_frame, text="Chart", padding=10)
         self.chart_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Create a button to open the chart in a browser
+        self.open_browser_button = ttk.Button(self.chart_frame, text="Open Chart in Browser", command=self.open_chart_in_browser)
+        self.open_browser_button.pack(pady=10)
+        self.open_browser_button.config(state="disabled")
+        
+        # Message when no chart is selected
+        self.chart_msg = ttk.Label(self.chart_frame, text="Select a stock to display chart")
+        self.chart_msg.pack(pady=20)
         
         self.signal_frame = ttk.LabelFrame(right_frame, text="Trading Signal", padding=10)
         self.signal_frame.pack(fill=tk.X, pady=10)
@@ -88,8 +104,14 @@ class StockTradingApp:
         
         self.signal_text = ttk.Label(self.signal_frame, text="")
         self.signal_text.pack(pady=5)
-        
-    def add_ticker(self):
+
+    def add_ticker(self,ticker):
+        self.watchlist.append(ticker)
+        self.watchlist_box.insert(tk.END, ticker)
+        # Fetch initial data
+        self.fetch_data(ticker)
+
+    def add_ticker_btn(self):
         ticker = simpledialog.askstring("Add Stock/Fund", "Enter stock symbol (e.g., AAPL):")
         if ticker:
             ticker = ticker.upper().strip()
@@ -103,10 +125,7 @@ class StockTradingApp:
                     return
                 
                 if ticker not in self.watchlist:
-                    self.watchlist.append(ticker)
-                    self.watchlist_box.insert(tk.END, ticker)
-                    # Fetch initial data
-                    self.fetch_data(ticker)
+                    self.add_ticker(ticker)
                     messagebox.showinfo("Success", f"{ticker} added to watchlist")
                 else:
                     messagebox.showinfo("Info", f"{ticker} is already in your watchlist")
@@ -132,8 +151,9 @@ class StockTradingApp:
             end_date = dt.datetime.now()
             start_date = end_date - dt.timedelta(days=365)  # 1 year of data
             data = yf.download(ticker, start=start_date, end=end_date)
-            
+            # Note that data has two-level index in columns, the second level is a constant equal to ticker, we we drop this level
             if not data.empty:
+                data.columns = data.columns.droplevel(1)
                 self.stock_data[ticker] = data
                 return True
             else:
@@ -177,37 +197,207 @@ class StockTradingApp:
             self.on_watchlist_select(None)  # Refresh the current selection
     
     def display_chart(self, ticker):
-        # Clear previous chart
-        self.clear_chart()
+        # Clear previous chart message
+        self.chart_msg.config(text=f"Chart for {ticker} created - click 'Open Chart in Browser' to view")
+        self.open_browser_button.config(state="normal")
         
         data = self.stock_data[ticker]
         
-        # Create matplotlib figure
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), gridspec_kw={'height_ratios': [3, 1]})
+        # Create a Plotly figure
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                            vertical_spacing=0.1, 
+                            row_heights=[0.7, 0.3],
+                            subplot_titles=(f"{ticker} - Price Chart", "Volume"))
         
-        # Plot price data
-        ax1.plot(data.index, data['Close'], label='Close Price')
-        ax1.set_title(f"{ticker} - Price Chart")
-        ax1.set_ylabel('Price')
-        ax1.grid(True)
-        ax1.legend()
+        # Add price data
+        fig.add_trace(go.Candlestick(
+            x=data.index,
+            open=data['Open'],
+            high=data['High'],
+            low=data['Low'],
+            close=data['Close'],
+            name='Price'
+        ), row=1, col=1)
         
-        # Plot volume - FIXED: Convert to list to avoid array conversion issues
-        x_values = list(range(len(data.index)))
-        ax2.bar(x_values, data['Volume'].values)
-        # Set x-axis ticks to match dates
-        ax2.set_xticks(x_values[::len(x_values)//5])  # Show only 5 dates for readability
-        ax2.set_xticklabels([data.index[i].strftime('%Y-%m-%d') for i in ax2.get_xticks()])
-        ax2.set_title('Volume')
-        ax2.set_ylabel('Volume')
-        ax2.grid(True)
+        # Add volume
+        # colors = []
+        # for _,row in data.iterrows():
+        #     if row['Open'] > row['Close']:
+        #         colors.append('red')
+        #     else:
+        #         colors.append('green')
+        colors = ['red' if row['Open'] > row['Close'] else 'green' for _, row in data.iterrows()]
+        fig.add_trace(go.Bar(
+            x=data.index,
+            y=data['Volume'],
+            name='Volume',
+            marker_color=colors
+        ), row=2, col=1)
+        
+        # Add indicators based on selected algorithm
+        if self.current_algorithm == "Moving Average Crossover":
+            # Add moving averages
+            short_window = 20
+            long_window = 50
+            
+            short_sma = data['Close'].rolling(window=short_window).mean()
+            long_sma = data['Close'].rolling(window=long_window).mean()
+            
+            fig.add_trace(go.Scatter(
+                x=data.index,
+                y=short_sma,
+                name=f'SMA {short_window}',
+                line=dict(color='blue')
+            ), row=1, col=1)
+            
+            fig.add_trace(go.Scatter(
+                x=data.index,
+                y=long_sma,
+                name=f'SMA {long_window}',
+                line=dict(color='orange')
+            ), row=1, col=1)
+            
+        elif self.current_algorithm == "RSI":
+            # Calculate and plot RSI
+            rsi = self.compute_rsi_data(data['Close'])
+            
+            # Add RSI subplot
+            fig.add_trace(go.Scatter(
+                x=data.index,
+                y=rsi,
+                name='RSI (14)',
+                line=dict(color='purple')
+            ), row=2, col=1)
+            
+            # Add RSI overbought/oversold lines
+            fig.add_shape(
+                type="line", line_color="red", line_width=1, line_dash="dash",
+                x0=data.index[0], x1=data.index[-1], y0=70, y1=70,
+                row=2, col=1
+            )
+            
+            fig.add_shape(
+                type="line", line_color="green", line_width=1, line_dash="dash",
+                x0=data.index[0], x1=data.index[-1], y0=30, y1=30,
+                row=2, col=1
+            )
+            
+            # Update y-axis range
+            fig.update_yaxes(range=[0, 100], row=2, col=1)
+            
+        elif self.current_algorithm == "MACD":
+            # Calculate MACD
+            macd, signal, histogram = self.compute_macd_data(data['Close'])
+            
+            # Add MACD plot
+            fig.add_trace(go.Scatter(
+                x=data.index,
+                y=macd,
+                name='MACD',
+                line=dict(color='blue')
+            ), row=2, col=1)
+            
+            fig.add_trace(go.Scatter(
+                x=data.index,
+                y=signal,
+                name='Signal',
+                line=dict(color='red')
+            ), row=2, col=1)
+            
+            # Add histogram as a bar chart
+            colors = ['red' if val < 0 else 'green' for val in histogram]
+            fig.add_trace(go.Bar(
+                x=data.index,
+                y=histogram,
+                name='Histogram',
+                marker_color=colors
+            ), row=2, col=1)
+            
+        elif self.current_algorithm == "Bollinger Bands":
+            # Calculate Bollinger Bands
+            window = 20
+            sma = data['Close'].rolling(window=window).mean()
+            std = data['Close'].rolling(window=window).std()
+            upper_band = sma + (std * 2)
+            lower_band = sma - (std * 2)
+            
+            # Add Bollinger Bands
+            fig.add_trace(go.Scatter(
+                x=data.index,
+                y=sma,
+                name='SMA 20',
+                line=dict(color='blue')
+            ), row=1, col=1)
+            
+            fig.add_trace(go.Scatter(
+                x=data.index,
+                y=upper_band,
+                name='Upper Band',
+                line=dict(color='red')
+            ), row=1, col=1)
+            
+            fig.add_trace(go.Scatter(
+                x=data.index,
+                y=lower_band,
+                name='Lower Band',
+                line=dict(color='green')
+            ), row=1, col=1)
+            
+            # Add a filled area between the bands
+            fig.add_trace(go.Scatter(
+                x=data.index.tolist() + data.index.tolist()[::-1],
+                y=upper_band.tolist() + lower_band.tolist()[::-1],
+                fill='toself',
+                fillcolor='rgba(0,100,80,0.2)',
+                line=dict(color='rgba(255,255,255,0)'),
+                hoverinfo='skip',
+                showlegend=False,
+                name='Bollinger Band'
+            ), row=1, col=1)
+        
+        # Update layout
+        fig.update_layout(
+            height=600,
+            xaxis_rangeslider_visible=False,
+            template='plotly_white',
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            )
+        )
+        
+        # Save the chart to a temporary HTML file
+        if self.temp_html_file:
+            try:
+                os.unlink(self.temp_html_file)  # Delete old file if it exists
+            except:
+                pass
+        
+        # Create a new temporary file
+        fd, self.temp_html_file = tempfile.mkstemp(suffix='.html')
+        os.close(fd)  # Close the file descriptor
+        
+        # Write the figure to the HTML file
+        fig.write_html(self.temp_html_file, auto_open=False)
+        
+    def open_chart_in_browser(self):
+        if self.temp_html_file and os.path.exists(self.temp_html_file):
+            webbrowser.open('file://' + self.temp_html_file)
+        else:
+            messagebox.showerror("Error", "No chart available to display")
     
-    # Add indicators based on selected algorithm
-    # [Rest of the function remains the same]
-        
     def clear_chart(self):
-        for widget in self.chart_frame.winfo_children():
-            widget.destroy()
+        self.chart_msg.config(text="Select a stock to display chart")
+        self.open_browser_button.config(state="disabled")
+        if self.temp_html_file:
+            try:
+                os.unlink(self.temp_html_file)
+                self.temp_html_file = None
+            except:
+                pass
     
     def calculate_signal(self, ticker):
         # Get the selected algorithm
@@ -247,7 +437,7 @@ class StockTradingApp:
         
         self.signal_text.config(text=text)
     
-    # Signal calculation algorithms
+    # Signal calculation algorithms - these remain largely the same
     def compute_ma_crossover(self, ticker):
         data = self.stock_data[ticker]
         
@@ -382,7 +572,7 @@ class StockTradingApp:
         # Calculate signal line
         signal_line = macd_line.ewm(span=signal, adjust=False).mean()
         
-        # Calculate histogrampy
+        # Calculate histogram
         histogram = macd_line - signal_line
         
         return macd_line, signal_line, histogram
@@ -438,7 +628,6 @@ class StockTradingApp:
 def main():
     root = tk.Tk()
     app = StockTradingApp(root)
-    
     # Set style
     style = ttk.Style()
     style.theme_use('clam')  # You can use 'clam', 'alt', 'default', 'classic'
